@@ -195,8 +195,8 @@ def tabela_download_excel(dfs: dict):
 # -----------------------------
 # App
 # -----------------------------
-st.title("Dashboard de Inadimplência | Autobras")
-st.caption("Análise financeira de contas a receber: visão por período, cliente, loja, aging e melhores práticas de cobrança.")
+st.title("Dashboard Financeiro | Autobras")
+st.caption("Análise de inadimplência e títulos a receber: visão por período, cliente, loja, aging e melhores práticas de cobrança.")
 
 with st.sidebar:
     st.header("Upload e filtros")
@@ -211,6 +211,12 @@ base = carregar_excel(arquivo)
 base_inad = base[base["É inadimplente"]].copy()
 
 with st.sidebar:
+    pagina = st.radio(
+        "Multipage",
+        ["Inadimplência", "Títulos a Receber"],
+        index=0
+    )
+
     st.subheader("Período de vencimento")
 
     anos_disponiveis = sorted(
@@ -273,11 +279,203 @@ if clientes_sel:
 if faixa_sel:
     filtro = filtro[filtro["Faixa de atraso"].astype(str).isin(faixa_sel)]
 
-inad = filtro[filtro["É inadimplente"]].copy()
+hoje_ref = pd.Timestamp(date.today()).normalize()
 
-valor_total_carteira = filtro["Valor Aberto"].sum()
+# Regra:
+# - Inadimplência considera somente títulos com vencimento até a data vigente.
+# - Títulos a Receber considera vencimentos de hoje para frente e que ainda não estão inadimplentes.
+base_vencida_ate_hoje = filtro[filtro["Data Vencimento"].notna() & (filtro["Data Vencimento"] <= hoje_ref)].copy()
+inad = base_vencida_ate_hoje[base_vencida_ate_hoje["É inadimplente"]].copy()
+
+titulos_receber = filtro[
+    filtro["Data Vencimento"].notna()
+    & (filtro["Data Vencimento"] >= hoje_ref)
+    & (~filtro["É inadimplente"])
+].copy()
+
+# ============================================================
+# MULTIPAGE: TÍTULOS A RECEBER
+# ============================================================
+
+if pagina == "Títulos a Receber":
+    st.subheader("Títulos a Receber")
+    st.caption("Títulos com vencimento de hoje para frente e que ainda não estão inadimplentes.")
+
+    valor_receber = titulos_receber["Valor Aberto"].sum()
+    qtd_receber = len(titulos_receber)
+    clientes_receber = titulos_receber["Cliente"].nunique()
+    ticket_medio_receber = valor_receber / qtd_receber if qtd_receber else 0
+    proximo_vencimento = titulos_receber["Data Vencimento"].min() if not titulos_receber.empty else pd.NaT
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Valor a receber", formatar_reais(valor_receber), f"{qtd_receber} títulos")
+    c2.metric("Clientes com títulos a vencer", f"{clientes_receber}")
+    c3.metric("Ticket médio", formatar_reais(ticket_medio_receber))
+    c4.metric("Próximo vencimento", proximo_vencimento.strftime("%d/%m/%Y") if pd.notna(proximo_vencimento) else "-")
+
+    if titulos_receber.empty:
+        st.success("Não há títulos a receber no filtro selecionado.")
+        st.stop()
+
+    por_periodo_receber = (
+        titulos_receber.groupby("Mês Vencimento", dropna=False)
+        .agg(
+            Valor_a_Receber=("Valor Aberto", "sum"),
+            Titulos=("Valor Aberto", "count"),
+            Clientes=("Cliente", "nunique"),
+            Primeiro_Vencimento=("Data Vencimento", "min"),
+            Ultimo_Vencimento=("Data Vencimento", "max"),
+        )
+        .reset_index()
+        .sort_values("Mês Vencimento")
+    )
+    por_periodo_receber["Ticket Médio"] = por_periodo_receber["Valor_a_Receber"] / por_periodo_receber["Titulos"]
+
+    por_cliente_receber = (
+        titulos_receber.groupby("Cliente", dropna=False)
+        .agg(
+            Valor_a_Receber=("Valor Aberto", "sum"),
+            Titulos=("Valor Aberto", "count"),
+            Primeiro_Vencimento=("Data Vencimento", "min"),
+            Ultimo_Vencimento=("Data Vencimento", "max"),
+            Loja_Principal=("Loja", lambda x: x.mode().iat[0] if not x.mode().empty else ""),
+        )
+        .reset_index()
+        .sort_values("Valor_a_Receber", ascending=False)
+    )
+    por_cliente_receber["Participação"] = por_cliente_receber["Valor_a_Receber"] / valor_receber if valor_receber else 0
+
+    por_loja_receber = (
+        titulos_receber.groupby("Loja", dropna=False)
+        .agg(
+            Valor_a_Receber=("Valor Aberto", "sum"),
+            Titulos=("Valor Aberto", "count"),
+            Clientes=("Cliente", "nunique"),
+        )
+        .reset_index()
+        .sort_values("Valor_a_Receber", ascending=False)
+    )
+    por_loja_receber["Participação"] = por_loja_receber["Valor_a_Receber"] / valor_receber if valor_receber else 0
+
+    aba_r1, aba_r2, aba_r3, aba_r4 = st.tabs(["Visão Geral", "Clientes", "Período", "Base analítica"])
+
+    with aba_r1:
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            fig_loja_rec = px.bar(
+                por_loja_receber,
+                x="Loja",
+                y="Valor_a_Receber",
+                text=por_loja_receber["Valor_a_Receber"].apply(formatar_reais),
+                title="Títulos a receber por loja",
+            )
+            fig_loja_rec.update_layout(yaxis_title="Valor a receber", xaxis_title="Loja")
+            st.plotly_chart(fig_loja_rec, use_container_width=True)
+        with c2:
+            fig_tree_rec = px.treemap(
+                por_cliente_receber.head(30),
+                path=["Cliente"],
+                values="Valor_a_Receber",
+                title="Top clientes por valor a receber",
+            )
+            st.plotly_chart(fig_tree_rec, use_container_width=True)
+
+        st.subheader("Resumo por loja")
+        st.dataframe(
+            por_loja_receber.assign(
+                Valor_a_Receber=por_loja_receber["Valor_a_Receber"].apply(formatar_reais),
+                Participação=por_loja_receber["Participação"].apply(lambda x: formatar_pct(x * 100)),
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with aba_r2:
+        st.subheader("Ranking de clientes com títulos a receber")
+        top_n_rec = st.slider("Quantidade de clientes no gráfico", 5, 30, 15, key="top_receber")
+        top_clientes_rec = por_cliente_receber.head(top_n_rec).sort_values("Valor_a_Receber")
+        fig_cli_rec = px.bar(
+            top_clientes_rec,
+            x="Valor_a_Receber",
+            y="Cliente",
+            orientation="h",
+            text=top_clientes_rec["Valor_a_Receber"].apply(formatar_reais),
+            title=f"Top {top_n_rec} clientes por valor a receber",
+        )
+        fig_cli_rec.update_layout(xaxis_title="Valor a receber", yaxis_title="Cliente")
+        st.plotly_chart(fig_cli_rec, use_container_width=True)
+
+        st.dataframe(
+            por_cliente_receber.assign(
+                Valor_a_Receber=por_cliente_receber["Valor_a_Receber"].apply(formatar_reais),
+                Participação=por_cliente_receber["Participação"].apply(lambda x: formatar_pct(x * 100)),
+                Primeiro_Vencimento=por_cliente_receber["Primeiro_Vencimento"].dt.strftime("%d/%m/%Y"),
+                Ultimo_Vencimento=por_cliente_receber["Ultimo_Vencimento"].dt.strftime("%d/%m/%Y"),
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with aba_r3:
+        st.subheader("Títulos a receber por período de vencimento")
+        fig_periodo_rec = px.line(
+            por_periodo_receber,
+            x="Mês Vencimento",
+            y="Valor_a_Receber",
+            markers=True,
+            text=por_periodo_receber["Valor_a_Receber"].apply(formatar_reais),
+            title="Evolução mensal dos títulos a receber",
+        )
+        fig_periodo_rec.update_layout(yaxis_title="Valor a receber", xaxis_title="Mês de vencimento")
+        st.plotly_chart(fig_periodo_rec, use_container_width=True)
+
+        st.dataframe(
+            por_periodo_receber.assign(
+                Valor_a_Receber=por_periodo_receber["Valor_a_Receber"].apply(formatar_reais),
+                **{"Ticket Médio": por_periodo_receber["Ticket Médio"].apply(formatar_reais)},
+                Primeiro_Vencimento=por_periodo_receber["Primeiro_Vencimento"].dt.strftime("%d/%m/%Y"),
+                Ultimo_Vencimento=por_periodo_receber["Ultimo_Vencimento"].dt.strftime("%d/%m/%Y"),
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with aba_r4:
+        st.subheader("Base analítica dos títulos a receber")
+        colunas_exibir_rec = [
+            "Código", "Cliente", "CPF/CNPJ", "Descrição", "Loja", "Forma de pagamento",
+            "Data Vencimento", "Valor Aberto", "Situação"
+        ]
+        colunas_exibir_rec = [c for c in colunas_exibir_rec if c in titulos_receber.columns]
+        detalhe_rec = titulos_receber[colunas_exibir_rec].sort_values(["Data Vencimento", "Valor Aberto"], ascending=[True, False]).copy()
+        detalhe_rec_view = detalhe_rec.copy()
+        detalhe_rec_view["Data Vencimento"] = detalhe_rec_view["Data Vencimento"].dt.strftime("%d/%m/%Y")
+        detalhe_rec_view["Valor Aberto"] = detalhe_rec_view["Valor Aberto"].apply(formatar_reais)
+        st.dataframe(detalhe_rec_view, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Exportar títulos a receber")
+    export_receber = tabela_download_excel({
+        "Resumo por Cliente": por_cliente_receber,
+        "Resumo por Loja": por_loja_receber,
+        "Resumo por Periodo": por_periodo_receber,
+        "Titulos a Receber": titulos_receber[[c for c in ["Código", "Cliente", "CPF/CNPJ", "Descrição", "Loja", "Forma de pagamento", "Data Vencimento", "Valor Aberto", "Situação"] if c in titulos_receber.columns]],
+    })
+    st.download_button(
+        "Baixar títulos a receber em Excel",
+        data=export_receber,
+        file_name="titulos_a_receber_autobras.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.stop()
+
+# ============================================================
+# MULTIPAGE: INADIMPLÊNCIA
+# ============================================================
+
+valor_total_carteira = base_vencida_ate_hoje["Valor Aberto"].sum()
 valor_inad = inad["Valor Aberto"].sum()
-qtd_titulos = len(filtro)
+qtd_titulos = len(base_vencida_ate_hoje)
 qtd_inad = len(inad)
 taxa_inad = (valor_inad / valor_total_carteira * 100) if valor_total_carteira else 0
 clientes_inad = inad["Cliente"].nunique()
@@ -285,8 +483,9 @@ maior_atraso = int(inad["Dias em atraso"].max()) if not inad.empty else 0
 media_atraso_pond = (inad["Dias em atraso"].clip(lower=0).mul(inad["Valor Aberto"]).sum() / valor_inad) if valor_inad else 0
 
 st.subheader("Indicadores executivos")
+st.caption("Inadimplência considera somente títulos com vencimento até a data vigente.")
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Carteira filtrada", formatar_reais(valor_total_carteira), f"{qtd_titulos} títulos")
+col1.metric("Carteira vencida filtrada", formatar_reais(valor_total_carteira), f"{qtd_titulos} títulos")
 col2.metric("Inadimplência", formatar_reais(valor_inad), f"{qtd_inad} títulos")
 col3.metric("Taxa de inadimplência", formatar_pct(taxa_inad))
 col4.metric("Clientes inadimplentes", f"{clientes_inad}")
