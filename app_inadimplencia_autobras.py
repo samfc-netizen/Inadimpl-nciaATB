@@ -89,6 +89,19 @@ def formatar_pct(valor):
         return "0,0%"
 
 
+
+MESES_PT = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
+MESES_PT_INV = {v: k for k, v in MESES_PT.items()}
+
+
+def ordenar_meses_nomes(meses):
+    return sorted(meses, key=lambda x: MESES_PT_INV.get(x, 99))
+
+
 def detectar_linha_cabecalho(uploaded_file):
     """Detecta a linha onde está o cabeçalho real do relatório."""
     preview = pd.read_excel(uploaded_file, header=None, nrows=10)
@@ -150,6 +163,8 @@ def carregar_excel(uploaded_file):
     )
     df["Mês Vencimento"] = df["Data Vencimento"].dt.to_period("M").astype(str)
     df["Ano"] = df["Data Vencimento"].dt.year
+    df["Mês Número"] = df["Data Vencimento"].dt.month
+    df["Mês Nome"] = df["Mês Número"].map(MESES_PT)
 
     return df
 
@@ -196,12 +211,35 @@ base = carregar_excel(arquivo)
 base_inad = base[base["É inadimplente"]].copy()
 
 with st.sidebar:
-    if base["Data Vencimento"].notna().any():
-        min_data = base["Data Vencimento"].min().date()
-        max_data = base["Data Vencimento"].max().date()
-        intervalo = st.date_input("Período de vencimento", value=(min_data, max_data), min_value=min_data, max_value=max_data)
+    st.subheader("Período de vencimento")
+
+    anos_disponiveis = sorted(
+        [int(a) for a in base["Ano"].dropna().unique().tolist()]
+    )
+
+    if anos_disponiveis:
+        anos_sel = st.multiselect(
+            "Ano",
+            anos_disponiveis,
+            default=anos_disponiveis,
+            help="Selecione um ou mais anos de vencimento."
+        )
+
+        base_anos = base[base["Ano"].isin(anos_sel)].copy() if anos_sel else base.iloc[0:0].copy()
+
+        meses_disponiveis = ordenar_meses_nomes(
+            base_anos["Mês Nome"].dropna().unique().tolist()
+        )
+
+        meses_sel = st.multiselect(
+            "Mês",
+            meses_disponiveis,
+            default=meses_disponiveis,
+            help="Selecione um ou mais meses de vencimento."
+        )
     else:
-        intervalo = None
+        anos_sel = []
+        meses_sel = []
 
     lojas = sorted(base["Loja"].dropna().unique().tolist())
     lojas_sel = st.multiselect("Loja", lojas, default=lojas)
@@ -217,9 +255,17 @@ with st.sidebar:
 
 # Aplica filtros
 filtro = base.copy()
-if intervalo and isinstance(intervalo, tuple) and len(intervalo) == 2:
-    inicio, fim = pd.Timestamp(intervalo[0]), pd.Timestamp(intervalo[1])
-    filtro = filtro[(filtro["Data Vencimento"] >= inicio) & (filtro["Data Vencimento"] <= fim)]
+
+if anos_sel:
+    filtro = filtro[filtro["Ano"].isin(anos_sel)]
+else:
+    filtro = filtro.iloc[0:0].copy()
+
+if meses_sel:
+    filtro = filtro[filtro["Mês Nome"].isin(meses_sel)]
+else:
+    filtro = filtro.iloc[0:0].copy()
+
 if lojas_sel:
     filtro = filtro[filtro["Loja"].isin(lojas_sel)]
 if clientes_sel:
