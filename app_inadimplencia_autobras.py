@@ -103,13 +103,31 @@ def ordenar_meses_nomes(meses):
 
 
 def detectar_linha_cabecalho(uploaded_file):
-    """Detecta a linha onde está o cabeçalho real do relatório."""
-    preview = pd.read_excel(uploaded_file, header=None, nrows=10)
+    """Detecta a linha onde está o cabeçalho real do relatório.
+
+    O relatório da Autobras pode vir com uma linha de título acima do cabeçalho
+    e pode chamar a data de vencimento de "Vencimento" ou "Data de vencimento".
+    """
+    uploaded_file.seek(0)
+    preview = pd.read_excel(uploaded_file, header=None, nrows=15)
     for i in range(len(preview)):
         row = [str(x).strip().lower() for x in preview.iloc[i].tolist()]
-        if "destinado à" in row and "data de vencimento" in row:
+        tem_cliente = "destinado à" in row or "destinado a" in row
+        tem_vencimento = "data de vencimento" in row or "vencimento" in row
+        tem_valor = "valor total" in row or "valor" in row
+        if tem_cliente and tem_vencimento and tem_valor:
             return i
     return 0
+
+
+def primeira_coluna_existente(df, opcoes):
+    """Retorna o primeiro nome de coluna encontrado na planilha."""
+    mapa = {str(c).strip().lower(): c for c in df.columns}
+    for opcao in opcoes:
+        chave = opcao.strip().lower()
+        if chave in mapa:
+            return mapa[chave]
+    return None
 
 
 def carregar_excel(uploaded_file):
@@ -121,30 +139,37 @@ def carregar_excel(uploaded_file):
     df = df.dropna(how="all").copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    colunas_esperadas = [
-        "Código", "Destinado à", "CPF/CNPJ", "Descrição", "Plano de contas",
-        "Forma de pagamento", "Conta bancária", "Centro de custo",
-        "Data de competência", "Data de vencimento", "Data de confirmação",
-        "Situação", "Valor", "Valor total", "Loja"
-    ]
-    faltantes = [c for c in ["Destinado à", "Data de vencimento", "Valor total"] if c not in df.columns]
+    # Aceita variações de nomes vindas do relatório do ERP.
+    col_cliente = primeira_coluna_existente(df, ["Destinado à", "Destinado a", "Cliente", "Nome"])
+    col_vencimento = primeira_coluna_existente(df, ["Data de vencimento", "Vencimento", "Data Vencimento"])
+    col_competencia = primeira_coluna_existente(df, ["Data de competência", "Competência", "Data Competência"])
+    col_confirmacao = primeira_coluna_existente(df, ["Data de confirmação", "Confirmação", "Data Confirmação"])
+    valor_col = primeira_coluna_existente(df, ["Valor total", "Valor", "Valor Aberto", "Saldo"])
+
+    faltantes = []
+    if not col_cliente:
+        faltantes.append("Destinado à / Cliente")
+    if not col_vencimento:
+        faltantes.append("Vencimento / Data de vencimento")
+    if not valor_col:
+        faltantes.append("Valor total / Valor")
     if faltantes:
         st.error(f"A planilha não contém as colunas obrigatórias: {', '.join(faltantes)}")
+        st.write("Colunas encontradas:", list(df.columns))
         st.stop()
 
     # Padronização básica
-    df["Cliente"] = df["Destinado à"].astype(str).str.strip()
+    df["Cliente"] = df[col_cliente].astype(str).str.strip()
     df["Loja"] = df.get("Loja", "Não informado").fillna("Não informado").astype(str).str.strip()
     df["Situação"] = df.get("Situação", "").fillna("").astype(str).str.strip()
     df["Forma de pagamento"] = df.get("Forma de pagamento", "Não informado").fillna("Não informado").astype(str).str.strip()
     df["Conta bancária"] = df.get("Conta bancária", "Não informado").fillna("Não informado").astype(str).str.strip()
     df["Descrição"] = df.get("Descrição", "").fillna("").astype(str).str.strip()
 
-    df["Data Vencimento"] = pd.to_datetime(df["Data de vencimento"], dayfirst=True, errors="coerce")
-    df["Data Competência"] = pd.to_datetime(df.get("Data de competência"), dayfirst=True, errors="coerce")
-    df["Data Confirmação"] = pd.to_datetime(df.get("Data de confirmação"), dayfirst=True, errors="coerce")
+    df["Data Vencimento"] = pd.to_datetime(df[col_vencimento], dayfirst=True, errors="coerce")
+    df["Data Competência"] = pd.to_datetime(df[col_competencia], dayfirst=True, errors="coerce") if col_competencia else pd.NaT
+    df["Data Confirmação"] = pd.to_datetime(df[col_confirmacao], dayfirst=True, errors="coerce") if col_confirmacao else pd.NaT
 
-    valor_col = "Valor total" if "Valor total" in df.columns else "Valor"
     df["Valor Aberto"] = df[valor_col].apply(limpar_moeda)
     df = df[df["Valor Aberto"] > 0].copy()
 
